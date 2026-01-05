@@ -1,0 +1,162 @@
+name: Deploy to GCP
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔑 Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: 📝 Create .env file
+        run: |
+          {
+            echo "# Polymarket API URLs"
+            echo "POLYMARKET_API_URL=${{ secrets.ENV_POLYMARKET_API_URL }}"
+            echo "GAMMA_API_URL=${{ secrets.ENV_GAMMA_API_URL }}"
+            echo "POLYGON_RPC_URL=${{ secrets.ENV_POLYGON_RPC_URL }}"
+            echo ""
+            echo "# Monitoring Settings"
+            echo "POLL_INTERVAL_MS=${{ secrets.ENV_POLL_INTERVAL_MS }}"
+            echo "MIN_TRADE_SIZE_USD=${{ secrets.ENV_MIN_TRADE_SIZE_USD }}"
+            echo ""
+            echo "# Alert Thresholds"
+            echo "ALERT_LARGE_TRADE=${{ secrets.ENV_ALERT_LARGE_TRADE }}"
+            echo "ALERT_WHALE_TRADE=${{ secrets.ENV_ALERT_WHALE_TRADE }}"
+            echo "ALERT_VOLUME_SPIKE=${{ secrets.ENV_ALERT_VOLUME_SPIKE }}"
+            echo "ALERT_PRICE_MOVE=${{ secrets.ENV_ALERT_PRICE_MOVE }}"
+            echo ""
+            echo "# Markets to Watch (comma-separated, empty = all)"
+            echo "WATCH_MARKETS=${{ secrets.ENV_WATCH_MARKETS }}"
+            echo ""
+            echo "# Wallets to Track (comma-separated)"
+            echo "WATCH_WALLETS=${{ secrets.ENV_WATCH_WALLETS }}"
+            echo ""
+            echo "# Telegram Bot (optional)"
+            echo "TELEGRAM_BOT_TOKEN=${{ secrets.ENV_TELEGRAM_BOT_TOKEN }}"
+            echo "TELEGRAM_CHAT_ID=${{ secrets.ENV_TELEGRAM_CHAT_ID }}"
+            echo ""
+            echo "# Discord Webhook (optional)"
+            echo "DISCORD_WEBHOOK_URL=${{ secrets.ENV_DISCORD_WEBHOOK_URL }}"
+            echo ""
+            echo "# Database"
+            echo "DATABASE_PATH=${{ secrets.ENV_DATABASE_PATH }}"
+          } > .env
+
+      - name: 📤 Upload .env to server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          scp -o StrictHostKeyChecking=no .env ${SSH_USER}@${SSH_HOST}:~/pollfind_env_temp
+
+      - name: 🚀 Deploy to server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} << 'EOF'
+            set -e
+
+            echo "📂 Preparing project directory..."
+            if [ ! -d ~/pollfind ]; then
+              echo "⚠️  First deployment, cloning repository..."
+              cd ~
+              git clone git@github.com:jackmoriso/pollfind.git
+            fi
+
+            if [ ! -d ~/pollfind/.git ]; then
+              echo "⚠️  pollfind directory exists but is not a git repository, re-cloning..."
+              rm -rf ~/pollfind
+              git clone git@github.com:jackmoriso/pollfind.git
+            fi
+
+            cd ~/pollfind
+
+            echo "📥 Pulling latest code..."
+            git fetch origin
+            git reset --hard origin/main
+            git clean -fd  # Remove untracked files and directories
+
+            echo "⚙️  Configuring environment variables..."
+            mv ~/pollfind_env_temp .env
+            chmod 600 .env
+
+            echo "🔍 Verifying environment file..."
+            if [ -f .env ]; then
+              echo "✓ .env exists"
+              echo "  File size: $(wc -c < .env) bytes"
+              echo "  Line count: $(wc -l < .env) lines"
+            else
+              echo "✗ .env missing!"
+              exit 1
+            fi
+
+            echo "📦 Installing dependencies..."
+            npm install
+
+            echo "🔨 Building application..."
+            npm run build
+
+            echo "🔄 Restarting application..."
+            # Check if PM2 is installed
+            if ! command -v pm2 &> /dev/null; then
+              echo "📦 Installing PM2..."
+              npm install -g pm2
+            fi
+
+            # Create logs directory
+            mkdir -p logs
+
+            # Make start script executable
+            chmod +x start.sh
+
+            # Test environment loading
+            echo "🧪 Testing environment variables..."
+            if [ -f .env ] && grep -q "POLYMARKET_API_URL" .env; then
+              echo "✓ Environment file looks good"
+            else
+              echo "✗ Invalid .env file"
+              exit 1
+            fi
+
+            # Stop old process
+            pm2 delete pollfind 2>/dev/null || true
+
+            # Start using ecosystem config (loads .env via start.sh)
+            pm2 start ecosystem.config.js
+
+            # Save PM2 config
+            pm2 save
+
+            echo "✅ Deployment complete!"
+            pm2 status
+
+            echo "📋 Viewing recent logs..."
+            pm2 logs pollfind --lines 20 --nostream || true
+          EOF
+
+      - name: ✅ Deployment Status
+        if: success()
+        run: |
+          echo "🎉 Application successfully deployed to server"
+          echo "📊 Monitor with: pm2 logs pollfind"
+
+      - name: ❌ Deployment Failed
+        if: failure()
+        run: |
+          echo "💥 Deployment failed, please check the logs"
