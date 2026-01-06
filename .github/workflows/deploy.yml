@@ -76,13 +76,13 @@ jobs:
             if [ ! -d ~/pollfind ]; then
               echo "⚠️  First deployment, cloning repository..."
               cd ~
-              git clone git@github.com:jackmoriso/pollfind.git
+              git clone git@github.com-pollfind:jackmoriso/pollfind.git
             fi
 
             if [ ! -d ~/pollfind/.git ]; then
               echo "⚠️  pollfind directory exists but is not a git repository, re-cloning..."
               rm -rf ~/pollfind
-              git clone git@github.com:jackmoriso/pollfind.git
+              git clone git@github.com-pollfind:jackmoriso/pollfind.git
             fi
 
             cd ~/pollfind
